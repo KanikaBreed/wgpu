@@ -471,6 +471,12 @@ impl Swapchain for NativeSwapchain {
         // will block if no image is available
         let (index, suboptimal) = match unsafe {
             profiling::scope!("vkAcquireNextImageKHR");
+            if acquire_refusal::fake_now() {
+                return match vk::Result::ERROR_OUT_OF_HOST_MEMORY {
+                    error if acquire_refusal::as_lost(error) => Err(crate::SurfaceError::Lost),
+                    error => Err(map_host_device_oom_and_lost_err(error).into()),
+                };
+            }
             self.functor.acquire_next_image(
                 self.raw,
                 timeout_ns,
@@ -965,6 +971,17 @@ pub mod acquire_refusal {
     /// Refusals taken as a lost surface since the start.
     pub fn total() -> u32 {
         TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// `AURORA_TEST_ACQUIRE_FAKE=<n>`: every n-th acquire answers "out of
+    /// memory" without asking the driver, to test both paths offline.
+    pub(super) fn fake_now() -> bool {
+        static EVERY: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let every = *EVERY.get_or_init(|| {
+            std::env::var("AURORA_TEST_ACQUIRE_FAKE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+        });
+        every > 0 && (CALLS.fetch_add(1, Ordering::Relaxed) + 1) % every == 0
     }
 
     pub(super) fn succeeded() {
