@@ -483,7 +483,10 @@ impl Swapchain for NativeSwapchain {
             #[cfg(target_os = "android")]
             Ok((index, _)) => (index, false),
             #[cfg(not(target_os = "android"))]
-            Ok(pair) => pair,
+            Ok(pair) => {
+                acquire_refusal::succeeded();
+                pair
+            }
             Err(error) => {
                 return match error {
                     vk::Result::TIMEOUT => Err(crate::SurfaceError::Timeout),
@@ -491,6 +494,15 @@ impl Swapchain for NativeSwapchain {
                         Err(crate::SurfaceError::Outdated)
                     }
                     vk::Result::ERROR_SURFACE_LOST_KHR => Err(crate::SurfaceError::Lost),
+                    // Aurora test build (#2970): Mesa's WSI answers "out of
+                    // memory" when a sync-file or syncobj ioctl fails while
+                    // it makes the acquire semaphore, not for memory. The
+                    // swapchain is rebuilt instead of the device lost.
+                    vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY
+                        if acquire_refusal::as_lost(error) =>
+                    {
+                        Err(crate::SurfaceError::Lost)
+                    }
                     // We don't use VK_EXT_full_screen_exclusive
                     // VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
                     other => Err(map_host_device_oom_and_lost_err(other).into()),
@@ -933,5 +945,44 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
         self.present_semaphores_guard
             .get_submit_signal_semaphore(device)
             .map(SemaphoreType::Binary)
+    }
+}
+
+/// Aurora test build (#2970): an "out of memory" answer of
+/// `vkAcquireNextImageKHR` taken as a lost surface, so that the caller
+/// rebuilds the swapchain instead of losing the device. Off with
+/// `AURORA_TEST_ACQUIRE_OOM=device`. More than [`MAX_IN_A_ROW`] in a row
+/// without an image between them: the device is lost as before, so that a
+/// real shortage cannot loop forever.
+pub mod acquire_refusal {
+    use ash::vk;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    const MAX_IN_A_ROW: u32 = 20;
+    static IN_A_ROW: AtomicU32 = AtomicU32::new(0);
+    static TOTAL: AtomicU32 = AtomicU32::new(0);
+
+    /// Refusals taken as a lost surface since the start.
+    pub fn total() -> u32 {
+        TOTAL.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn succeeded() {
+        IN_A_ROW.store(0, Ordering::Relaxed);
+    }
+
+    pub(super) fn as_lost(error: vk::Result) -> bool {
+        if std::env::var("AURORA_TEST_ACQUIRE_OOM").is_ok_and(|v| v.trim() == "device") {
+            log::error!("vkAcquireNextImageKHR refused an image ({error:?}): the device is lost (AURORA_TEST_ACQUIRE_OOM=device)");
+            return false;
+        }
+        let row = IN_A_ROW.fetch_add(1, Ordering::Relaxed) + 1;
+        if row > MAX_IN_A_ROW {
+            log::error!("vkAcquireNextImageKHR refused an image ({error:?}) {row} times in a row: the device is lost");
+            return false;
+        }
+        let total = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+        log::warn!("vkAcquireNextImageKHR refused an image ({error:?}): the swapchain is rebuilt (refusal {total}, {row} in a row)");
+        true
     }
 }

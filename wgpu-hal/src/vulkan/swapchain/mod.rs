@@ -6,6 +6,7 @@ use crate::vulkan::{semaphore_list::SemaphoreType, DeviceShared};
 pub(super) use native::*;
 
 mod native;
+pub use native::acquire_refusal;
 
 /// Win32 `HWND`, handed to a Win32 [`NativeSurface`] at construction so it can
 /// build its [`DxgiHdrSource`](crate::auxil::dxgi::hdr::DxgiHdrSource) for the

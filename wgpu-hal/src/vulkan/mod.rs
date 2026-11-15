@@ -34,6 +34,7 @@ mod instance;
 mod sampler;
 mod semaphore_list;
 mod swapchain;
+pub use swapchain::acquire_refusal;
 
 pub use adapter::PhysicalDeviceFeatures;
 
